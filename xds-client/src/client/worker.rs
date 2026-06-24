@@ -695,6 +695,10 @@ where
             }
 
             let resource_names = type_state.resource_names_for_request();
+            tracing::info!(
+                "xds-trace build_initial_request type_url={} resource_names={:?}",
+                type_url, resource_names
+            );
 
             let request = DiscoveryRequest {
                 node: &self.node,
@@ -917,6 +921,10 @@ where
         };
 
         let resource_names = type_state.resource_names_for_request();
+        tracing::info!(
+            "xds-trace send_request type_url={} resource_names={:?}",
+            type_url, resource_names
+        );
         let request = DiscoveryRequest {
             node: &self.node,
             type_url,
@@ -945,6 +953,16 @@ where
     ) -> Result<()> {
         let response = self.codec.decode_response(bytes)?;
         let type_url = response.type_url.clone();
+
+        // BID-2147 instrumentation: fires for EVERY decoded response, before the
+        // no-type_state early-return below — so absence here means no response at all.
+        tracing::info!(
+            "xds-trace handle_response ENTER type_url={} resources={} version={:?} nonce={:?}",
+            type_url,
+            response.resources.len(),
+            response.version_info,
+            response.nonce,
+        );
 
         let (type_url_arc, decoder) = match self.type_states.get(&type_url) {
             Some(s) => (Arc::clone(&s.type_url), &s.decoder),
