@@ -177,6 +177,12 @@ impl XdsChannelBuilder {
 
         #[allow(unused_mut)]
         let mut transport_builder = TonicTransportBuilder::new();
+        // BID-2147: Traffic Director uses `channel_creds: [google_default]`, which
+        // needs TLS + an ADC bearer token on the xDS stream. The transport builds
+        // that itself (TLS + token) when this flag is set.
+        if bootstrap.is_google_default() {
+            transport_builder = transport_builder.with_google_default(true);
+        }
         #[cfg(any(feature = "tls-ring", feature = "tls-aws-lc"))]
         if bootstrap.use_tls() {
             transport_builder = transport_builder

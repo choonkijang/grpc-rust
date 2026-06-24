@@ -17,6 +17,7 @@ bytes = "1.11.0"
 thiserror = "2"
 tokio = { version = "1", features = ["sync", "macros"] }
 tracing = "0.1"  # BID-2147 instrumentation
+google-cloud-auth = "1.8"  # BID-2147: google_default xDS-server ADC token (Traffic Director)
 
 # Optional dependencies for tonic transport
 tonic = { version = "0.14", optional = true }

@@ -278,6 +278,24 @@ impl BootstrapConfig {
     pub(crate) fn use_tls(&self) -> bool {
         self.selected_credential() == Some(&ChannelCredentialType::Tls)
     }
+
+    /// BID-2147: `true` if the first server's first supported-or-`google_default`
+    /// credential is `google_default` (honoring gRFC A27 ordering — an earlier
+    /// `insecure`/`tls` wins). Traffic Director's bootstrap uses
+    /// `channel_creds: [{ "type": "google_default" }]`, which `selected_credential`
+    /// otherwise skips; this lets the transport enable TLS + an ADC bearer token.
+    pub(crate) fn is_google_default(&self) -> bool {
+        self.xds_servers
+            .first()
+            .and_then(|s| {
+                s.channel_creds.iter().find_map(|c| match &c.cred_type {
+                    ChannelCredentialType::Insecure | ChannelCredentialType::Tls => Some(false),
+                    ChannelCredentialType::Unsupported(t) if t == "google_default" => Some(true),
+                    ChannelCredentialType::Unsupported(_) => None,
+                })
+            })
+            .unwrap_or(false)
+    }
 }
 
 impl TryFrom<NodeConfig> for Node {

@@ -8,7 +8,10 @@ use crate::client::config::ServerConfig;
 use crate::error::{Error, Result};
 use crate::transport::{Transport, TransportBuilder, TransportStream};
 use bytes::{Buf, BufMut, Bytes};
+// BID-2147: GCP ADC auth for `google_default` xDS-server creds (Traffic Director).
+use google_cloud_auth::credentials::{AccessTokenCredentials, Builder as GcpCredBuilder};
 use http::uri::PathAndQuery;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_stream::StreamExt as _;
 use tonic::client::Grpc;
@@ -77,9 +80,22 @@ impl Decoder for BytesDecoder {
 }
 
 /// Factory for creating ADS streams using tonic.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct TonicTransport {
     channel: Channel,
+    /// BID-2147: GCP ADC credentials for `google_default` xDS-server auth. When
+    /// present, `new_stream` attaches `authorization: Bearer <token>` to the ADS
+    /// stream (required to talk to Traffic Director).
+    creds: Option<Arc<AccessTokenCredentials>>,
+}
+
+impl std::fmt::Debug for TonicTransport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TonicTransport")
+            .field("channel", &self.channel)
+            .field("google_default_creds", &self.creds.is_some())
+            .finish()
+    }
 }
 
 impl TonicTransport {
@@ -104,7 +120,10 @@ impl TonicTransport {
     /// let transport = TonicTransport::from_channel(channel);
     /// ```
     pub fn from_channel(channel: Channel) -> Self {
-        Self { channel }
+        Self {
+            channel,
+            creds: None,
+        }
     }
 
     /// Connect to an xDS server with default settings.
@@ -151,6 +170,10 @@ pub struct TonicTransportBuilder {
     // - Per-server credential overrides (via ServerConfig.extensions)
     #[cfg(any(feature = "tonic-tls-ring", feature = "tonic-tls-aws-lc"))]
     tls_config: Option<tonic::transport::ClientTlsConfig>,
+    /// BID-2147: use GCP `google_default` credentials for the xDS-server
+    /// connection (Traffic Director): forces TLS (system roots) + attaches a
+    /// per-stream ADC bearer token. Set from the bootstrap `channel_creds`.
+    google_default: bool,
 }
 
 impl TonicTransportBuilder {
@@ -168,12 +191,65 @@ impl TonicTransportBuilder {
         self.tls_config = Some(tls_config);
         self
     }
+
+    /// BID-2147: enable GCP `google_default` xDS-server credentials (TLS + ADC
+    /// bearer token), as required to reach Traffic Director
+    /// (`trafficdirector.googleapis.com:443`). Mirrors `common::xds::client`.
+    pub fn with_google_default(mut self, enabled: bool) -> Self {
+        self.google_default = enabled;
+        self
+    }
+
+    /// Build a TLS channel to the xDS server with a GCP ADC token source
+    /// (`google_default`). Forces an `https://` scheme + system roots.
+    #[cfg(any(feature = "tonic-tls-ring", feature = "tonic-tls-aws-lc"))]
+    async fn build_google_default(&self, server: &ServerConfig) -> Result<TonicTransport> {
+        let raw = server.uri();
+        let host = raw.rsplit_once(':').map(|(h, _)| h).unwrap_or(raw).to_string();
+        let uri = if raw.contains("://") {
+            raw.to_string()
+        } else {
+            format!("https://{raw}")
+        };
+        let tls = tonic::transport::ClientTlsConfig::new()
+            .domain_name(host)
+            .with_enabled_roots();
+        let channel = Endpoint::from_shared(uri)
+            .map_err(|e| Error::Connection(e.to_string()))?
+            .tls_config(tls)
+            .map_err(|e| Error::Connection(e.to_string()))?
+            .connect()
+            .await
+            .map_err(|e| Error::Connection(e.to_string()))?;
+        let creds = GcpCredBuilder::default()
+            .with_scopes(["https://www.googleapis.com/auth/cloud-platform"])
+            .build_access_token_credentials()
+            .map_err(|e| Error::Connection(format!("google_default credentials: {e}")))?;
+        Ok(TonicTransport {
+            channel,
+            creds: Some(Arc::new(creds)),
+        })
+    }
+
+    #[cfg(not(any(feature = "tonic-tls-ring", feature = "tonic-tls-aws-lc")))]
+    async fn build_google_default(&self, _server: &ServerConfig) -> Result<TonicTransport> {
+        Err(Error::Connection(
+            "google_default xDS creds require a TLS feature (tonic-tls-ring / tonic-tls-aws-lc)"
+                .into(),
+        ))
+    }
 }
 
 impl TransportBuilder for TonicTransportBuilder {
     type Transport = TonicTransport;
 
     async fn build(&self, server: &ServerConfig) -> Result<Self::Transport> {
+        // BID-2147: `google_default` (Traffic Director) needs TLS + an ADC bearer
+        // token — handled separately so the plaintext path stays unchanged.
+        if self.google_default {
+            return self.build_google_default(server).await;
+        }
+
         // `Endpoint::from_shared` routes `unix://` URIs to tonic's UDS connector.
         // Required for control planes like Istio's grpc-agent that ship `unix:///etc/istio/proxy/XDS`.
         let endpoint = Endpoint::from_shared(server.uri().to_string())
@@ -218,8 +294,22 @@ impl Transport for TonicTransport {
 
         let path = PathAndQuery::from_static(ADS_PATH);
 
+        // BID-2147: for `google_default`, attach the GCP ADC bearer token to the
+        // ADS stream (Traffic Director rejects unauthenticated streams).
+        let mut request = tonic::Request::new(request_stream);
+        if let Some(creds) = &self.creds {
+            let token = creds
+                .access_token()
+                .await
+                .map_err(|e| Error::Connection(format!("google_default token fetch: {e}")))?;
+            let value =
+                tonic::metadata::MetadataValue::try_from(format!("Bearer {}", token.token))
+                    .map_err(|e| Error::Connection(format!("google_default token metadata: {e}")))?;
+            request.metadata_mut().insert("authorization", value);
+        }
+
         let response = grpc
-            .streaming(tonic::Request::new(request_stream), path, BytesCodec)
+            .streaming(request, path, BytesCodec)
             .await
             .map_err(Error::Stream)?;
 
