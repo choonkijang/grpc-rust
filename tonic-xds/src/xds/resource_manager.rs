@@ -158,6 +158,7 @@ impl CascadeState {
             } => {
                 match &listener.route_source {
                     RouteSource::Inline(rc) => {
+                        tracing::info!("xds-trace handle_lds ok: inline route config");
                         // Drop any existing RDS watcher — routes are inline.
                         self.rds_watcher = None;
                         self.rds_name = None;
@@ -167,6 +168,7 @@ impl CascadeState {
                         self.reconcile_clusters(&rc, xds_client, cache).await;
                     }
                     RouteSource::Rds(rds_name) => {
+                        tracing::info!("xds-trace handle_lds ok: rds route_config_name={rds_name}");
                         if self.rds_name.as_deref() != Some(rds_name) {
                             self.rds_watcher =
                                 Some(xds_client.watch::<RouteConfigResource>(rds_name).await);
@@ -181,8 +183,12 @@ impl CascadeState {
             // cached resource are treated as ambient — keep using the cached resource
             // to avoid unnecessary outages. Downstream layers (routing, LB) retain
             // their own snapshots independently.
-            ResourceEvent::ResourceChanged { result: Err(_), .. }
-            | ResourceEvent::AmbientError { .. } => {}
+            ResourceEvent::ResourceChanged { result: Err(e), .. } => {
+                tracing::warn!("xds-trace handle_lds resource error: {e:?}");
+            }
+            ResourceEvent::AmbientError { .. } => {
+                tracing::warn!("xds-trace handle_lds ambient error");
+            }
         }
     }
 

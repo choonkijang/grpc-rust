@@ -992,6 +992,20 @@ where
             .map(|r| r.name().to_string())
             .collect();
 
+        // BID-2147 instrumentation: surface exactly what TD returned for each
+        // type, the decode/validation outcome, and the resource names (to compare
+        // against the subscribed name — reveals an xdstp name byte-mismatch).
+        tracing::info!(
+            "xds-trace handle_response type_url={} version={:?} nonce={:?} valid={} received_names={:?} per_resource_errors={:?} top_level_errors={:?}",
+            type_url,
+            response.version_info,
+            response.nonce,
+            valid_resources.len(),
+            received_names,
+            per_resource_errors,
+            top_level_errors,
+        );
+
         let mut processing_done_futures = self.dispatch_resources(&type_url, valid_resources).await;
 
         // Only notify watchers for per-resource errors (where we know the name).
