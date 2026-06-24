@@ -616,10 +616,18 @@ where
                 None => return, // No servers configured
             };
             self.recorder.set_server(Arc::from(server.uri()));
+            tracing::info!("xds-trace worker: connecting to xds server={}", server.uri());
 
             let transport = match self.transport_builder.build(server).await {
-                Ok(t) => t,
-                Err(_) => {
+                Ok(t) => {
+                    tracing::info!("xds-trace worker: transport built to {}", server.uri());
+                    t
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "xds-trace worker: transport build FAILED server={}: {e:?}",
+                        server.uri()
+                    );
                     self.record_unhealthy(&mut healthy);
                     match self.backoff.next_backoff() {
                         Some(backoff) => self.runtime.sleep(backoff).await,
@@ -631,10 +639,12 @@ where
 
             let stream = match transport.new_stream(self.build_initial_requests()).await {
                 Ok(s) => {
+                    tracing::info!("xds-trace worker: ADS stream established");
                     self.backoff.reset();
                     s
                 }
-                Err(_) => {
+                Err(e) => {
+                    tracing::warn!("xds-trace worker: new_stream FAILED: {e:?}");
                     self.record_unhealthy(&mut healthy);
                     match self.backoff.next_backoff() {
                         Some(backoff) => self.runtime.sleep(backoff).await,
@@ -652,6 +662,7 @@ where
             match self.run_connected(stream).await {
                 ConnectedOutcome::Shutdown => return,
                 ConnectedOutcome::Failed { saw_response } => {
+                    tracing::warn!("xds-trace worker: stream Failed saw_response={saw_response}");
                     // gRFC A78: a server goes unhealthy (one `server_failure`) on
                     // a connectivity failure or when the ADS stream fails
                     // *without* seeing a response message. A stream that failed
